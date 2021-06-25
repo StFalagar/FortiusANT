@@ -272,6 +272,10 @@ fortius_fw = os.path.join(dirname, 'tacxfortius_1942_firmware.hex')
 #     def SendToTrainerUSBData(TacxMode, ...)                 # Compose new buffer to be sent
 #     def _ReceiveFromTrainer ()                              # Read and parse new data from trainer
 #
+# class clsTacxSerialTrainer(clsTacxUsbTrainer)               # New Class to handle Direct Connection between T1941 Brake and Rpi/TTL Connector
+#     def SendToTrainerSerialData()  
+#     def _ReceiveFromTrainer()
+#
 #-------------------------------------------------------------------------------
 # c l s T a c x T r a i n e r           The parent for all trainers
 #-------------------------------------------------------------------------------
@@ -2923,6 +2927,531 @@ class clsTacxNewUsbTrainer(clsTacxUsbTrainer):
                     if self.Resistance2PowerMB(self.currentR[i], self.SpeedKmh) >= self.TargetPower:
                         break
                 rtn = self.targetR[i]
+
+        rtn = int(rtn)
+
+        if debug.on(debug.Function):logfile.Write (\
+            "clsTacxNewUsbTrainer.TargetPower2Resistance(%s, %s) = %s" % \
+            (self.TargetPower, self.WheelSpeed, rtn ))
+        self.TargetResistance = rtn
+
+    #---------------------------------------------------------------------------
+    # Limit Resistance to avoid the Cycle of Death
+    #
+    # This a phenomenon occuring in ERGmode (constant power, resistance depends
+    # on (wheel)speed): if you get tired at a certain power and cycle slower, 
+    # the resistance keeps going up untill Power/0 = infinite and you "die".
+    # Starting-up will be quite impossible as well: Power/0.1 is very high!
+    # ==> 1: Resistance must be limitted to a maximum at low wheel-speeds
+    #
+    # Also, Fortius (I do not know for others) does not perform well for high
+    # resistances at low wheelspeed. Practical tests have shown a maximum
+    # of Resistance = 4500 at 10km/hr. Higher resistances cause stuttering.
+    # ==> 2: Same rule, other reason.
+    #
+    # The protection is that when Speed droppes below 10km/hr, the resistance is
+    # limitted. And, if you do not like this, avoid going into this protection,
+    # by keeping the wheelspeed above 10km/hr in ERG-mode rides.
+    #
+    # Note that, the protection factor must be Speed (not Cadence), since that
+    # is used in Power2Resistance. Note that, Speed may drop faster than Cadance!
+    #
+    # Note also that, the figures are empirically determined.
+    # option 1. R=6000 at 15km/hr ==> 6000 / 128866 * (15 * 301) = 210Watt
+    # option 2. R=4500 at 10km/hr ==> 4500 / 128866 * (10 * 301) = 100Watt
+    #
+    # The minium of 1500 is chosen above calibration level to avoid that the
+    # brake is going to spinn (negative power mode).
+    #
+    # It means that the required power is maintained untill 10 km/hr, then drops
+    # to 100Watt and gradually runs down to minimum at zero-speed.
+    # Also, when required power would be 300Watt and you speed up from
+    # 1...10km/hr, the power gradually increases to 100Watt untill above 10km/hr
+    # the real power is set.
+    #
+    # With all this said, a similar function should be present in the LegacyUSB
+    # class; or function generalized and constants 1500 and 4500 (6000) adjusted.
+    #---------------------------------------------------------------------------
+    def __AvoidCycleOfDeath(self, Resistance):
+
+        if self.TargetMode == mode_Power and self.SpeedKmh <= 10 and Resistance >= 6000:
+            Resistance = int(1500 + self.SpeedKmh * 300)
+#           print('__AvoidCycleOfDeath', self.SpeedKmh, Resistance)
+
+        return Resistance
+
+    #---------------------------------------------------------------------------
+    # S e n d T o T r a i n e r D a t a
+    #---------------------------------------------------------------------------
+    # input     Mode, Target, Pedecho, Weight, Calibrate
+    #
+    # function  Called by SendToTrainer()
+    #           Compose buffer to be sent to trainer
+    #
+    # returns   data
+    #---------------------------------------------------------------------------
+    def SendToTrainerUSBData(self, TacxMode, Calibrate, PedalEcho, Target, Weight):
+        Target = int(min(0x7fff, Target))
+        Weight = int(min(0xff,   Weight))
+        #-----------------------------------------------------------------------
+        # Data buffer depends on trainer_type
+        # Refer to TotalReverse; "Newer protocol"
+        #-----------------------------------------------------------------------
+        # 2021-01-14 Description appears to be extended as follows:
+        # 0	0x01	command number (1 = control command)
+        # 1	0x08	payload message size (0 = no payload)
+        # 2	0x01	payload type (0x01 = control data?)
+        # 3	0x00	never seen anything else than 0x00 - maybe high byte of little endian 16 bit?
+        #
+        # Therefore USB_ControlCommand  = 0x00010801 ==> CommandNumber = 1
+        #       and USB_VersionRequest  = 0x00000002 ==> CommandNumber = 2
+        # I do not change the code accordingly (just for sake of beauty?)
+        #       in favor of stability
+        #-----------------------------------------------------------------------
+        fControlCommand     = sc.unsigned_int       # 0...3
+        fTarget             = sc.short              # 4, 5      Resistance for Power=50...1000Watt
+        fPedalecho          = sc.unsigned_char      # 6
+        fFiller7            = sc.pad                # 7
+        fMode               = sc.unsigned_char      # 8         Idle=0, Ergo/Slope=2, Calibrate/speed=3
+        fWeight             = sc.unsigned_char      # 9         0x0a for 'almost no fly wheel' or
+                                                            # weight of rider+bike in kg for 
+                                                            # 'realistic' simulation of riders mass
+                                                            # TotalReverse, updated 2020-01-04
+        fCalibrate          = sc.unsigned_short     # 10, 11    Depends on mode
+
+        #-----------------------------------------------------------------------
+        # Avoid motor-function for low TargetPower
+        # The motor-function seemed odd when this piece of code was created.
+        # BUT: for people with a very low FTP (50 Watt), the resistance of the
+        #      bike without brake is already more than the required power and
+        #      hence motor-operation is usefull
+        #
+        # Is disabled with "if False"
+        #
+        # 2021-02-19 Test done: -m with delta power = 10Watt
+        #       Calibration = approximately 37 Watt
+        #       Requested power 90..80..70..60..50..40 Watt: normal behaviour
+        #                       30..20..10..0 Watt: motor starts to help
+        #                       There still is a slight feeling to cycle.
+        #       Conclusion: also in PowerMode, Target may drop below Calibrate.
+        #-----------------------------------------------------------------------
+        if False and self.TargetMode == mode_Power and Target < Calibrate:
+            Target = Calibrate        
+
+        #-----------------------------------------------------------------------
+        # Build data buffer to be sent to trainer (legacy or new)
+        #-----------------------------------------------------------------------
+        self.ControlCommand = USB_ControlCommand
+        format = sc.no_alignment + fControlCommand + fTarget + fPedalecho + fFiller7 + fMode +    fWeight + fCalibrate
+        data   = struct.pack (format, self.ControlCommand,Target, PedalEcho,        TacxMode,  int(Weight),  Calibrate)
+        return data
+
+    #---------------------------------------------------------------------------
+    # S e n d T o T r a i n e r D a t a _ M o t o r B r a k e
+    #---------------------------------------------------------------------------
+    # input     None
+    #
+    # function  Called by SendToTrainer()
+    #           Compose buffer to ask for Motor Brake Version
+    #
+    # returns   data
+    #---------------------------------------------------------------------------
+    def SendToTrainerUSBData_MotorBrake(self):
+        #-----------------------------------------------------------------------
+        # Data buffer "T1941 Motor Brake Version Message", refer to TotalReverse
+        # https://github.com/totalreverse/ttyT1941/wiki#t1941-motor-brake-commands-and-answers
+        #-----------------------------------------------------------------------
+        fControlCommand     = sc.unsigned_int       # 0...3
+
+        #-----------------------------------------------------------------------
+        # Build data buffer to be sent to trainer
+        #-----------------------------------------------------------------------
+        self.ControlCommand = USB_VersionRequest
+        format = sc.no_alignment + fControlCommand
+        data   = struct.pack (format, self.ControlCommand)
+        return data
+
+    #---------------------------------------------------------------------------
+    # R e c e i v e F r o m T r a i n e r
+    #---------------------------------------------------------------------------
+    # input     usbDevice
+    #
+    # function  Read status from trainer
+    #
+    # returns   Speed, PedalEcho, HeartRate, CurrentPower, Cadence, Resistance, Buttons
+    #
+    #---------------------------------------------------------------------------
+    def _ReceiveFromTrainer(self):
+        if debug.on(debug.Function):logfile.Write ("clsTacxNewUsbTrainer._ReceiveFromTrainer()")
+        #-----------------------------------------------------------------------
+        # Read from trainer
+        # 64 bytes are expected
+        # 48 bytes are returned by some trainers
+        # 24 bytes are sometimes returned (T1932, Gui Leite 2020-06-11) and
+        #           seem to be incomplete buffers and are ignored.
+        # Also my own tacx returns empty buffers, very seldomly though
+        #-----
+        # TotalReverse, 2020-09-27:
+        # One more Information: the brake only sends an answer after receiving a
+        # command from the head unit. And the 1942 head unit only sends a command
+        # to the brake after receiving a frame from the host.
+        # You first have to increase the send rate to receive more frames
+        # (answers) from the brake.
+        #
+        # 2020-09-29 Practice shows that retry works; if not a message is given.
+        # Then the buffer is ignored to avoid returning wrong data. The outer
+        # loop will send a command and then receive again.
+        # Perhaps just ignoring the short buffer would be enough as well, but
+        # this has been tested and found working so I leave it.
+        #
+        # 2020-11-18 sleep() only done when too short buffer received
+        #   As said this SHOULD occur seldomly; if frequently it's bad behaviour
+        #   at this location. It is logged so that we don't mis it.
+        #-----------------------------------------------------------------------
+        # 2021-01-14 Description appears to be extended as follows:
+        # Header			Size: 4 bytes
+        # 24	0	0x03	command number (answer command)
+        # 25	1	0x13	payload data size 19
+        # 26	2	0x02	payload type number (0x02 = control answer)
+        # 27	3	0x00	never seen anything else than 0x00 - maybe high byte of little endian 16 bit?
+        #
+        # Therefore USB_ControlResponse = 0x00021303 ==> CommandResponse = 3
+        #       and USB_VersionResponse = 0x00000c03 ==> CommandResponse = 3
+        # As in SendToTrainerUSBData() I do not change the code accordingly.
+        #-----------------------------------------------------------------------
+        data  = self.USB_Read_retry4x40()
+
+        if len(data) < 40:
+            pass
+        else:
+            #-----------------------------------------------------------------------
+            # Define buffer format
+            #-----------------------------------------------------------------------
+            #nDeviceSerial      =  0                # 0...1
+            fDeviceSerial       = sc.unsigned_short
+
+            fFiller2_7          = sc.pad * ( 7 - 1) # 2...7
+
+            #nYearProduction    =  1                # 8
+            fYearProduction     = sc.unsigned_char
+
+            fFiller9_11         = sc.pad * (11 - 8) # 9...11
+
+            nHeartRate          =  2                # 12
+            fHeartRate          = sc.unsigned_char
+
+            nButtons            =  3                # 13
+            fButtons            = sc.unsigned_char
+
+            #nHeartDetect       =  4                # 14
+            fHeartDetect        = sc.unsigned_char
+
+            #nErrorCount        =  5                # 15
+            fErrorCount         = sc.unsigned_char
+
+            #nAxis0             =  6                # 16-17
+            fAxis0              = sc.unsigned_short
+
+            nAxis1              =  7                # 18-19
+            fAxis1              = sc.unsigned_short
+
+            #nAxis2             =  8                # 20-21
+            fAxis2              = sc.unsigned_short
+
+            #nAxis3             =  9                # 22-23
+            fAxis3              = sc.unsigned_short
+
+            _nHeader            = 10                # 24-27
+            fHeader             = sc.unsigned_int
+
+            #nDistance          = 11                # 28-31
+            fDistance           = sc.unsigned_int
+
+            nSpeed              = 12                # 32, 33            Wheel speed (Speed = WheelSpeed / SpeedScale in km/h)
+            fSpeed              = sc.unsigned_short
+
+            fFiller34_35        = sc.pad * 2        # 34...35           Increases if you accellerate?
+            fFiller36_37        = sc.pad * 2        # 36...37           Average power?
+
+            nCurrentResistance  = 13                # 38, 39
+            fCurrentResistance  = sc.short
+
+            nTargetResistance   = 14                # 40, 41
+            fTargetResistance   = sc.short
+
+            nEvents             = 15                # 42
+            fEvents             = sc.unsigned_char
+
+            fFiller43           = sc.pad            # 43
+
+            nCadence            = 16                # 44
+            fCadence            = sc.unsigned_char
+
+            fFiller45           = sc.pad            # 45
+
+            #nModeEcho          = 17                # 46
+            fModeEcho           = sc.unsigned_char
+
+            #nChecksumLSB       = 18                # 47
+            fChecksumLSB        = sc.unsigned_char
+
+            #nChecksumMSB       = 19                # 48
+            fChecksumMSB        = sc.unsigned_char
+
+            fFiller49_63        = sc.pad * (63 - 48)# 49...63
+
+            format = sc.no_alignment + fDeviceSerial + fFiller2_7 + fYearProduction + \
+                    fFiller9_11 + fHeartRate + fButtons + fHeartDetect + fErrorCount + \
+                    fAxis0 + fAxis1 + fAxis2 + fAxis3 + fHeader + fDistance + fSpeed + \
+                    fFiller34_35 + fFiller36_37 + fCurrentResistance + fTargetResistance + \
+                    fEvents + fFiller43 + fCadence + fFiller45 + fModeEcho + \
+                    fChecksumLSB + fChecksumMSB + fFiller49_63
+
+            #-----------------------------------------------------------------------
+            # Buffer must be 64 characters (struct.calcsize(format)),
+            # Note that tt_FortiusSB returns 48 bytes only; append with dummy
+            #-----------------------------------------------------------------------
+            for _v in range( 64 - len(data) ):
+                data.append(0)
+
+            #-----------------------------------------------------------------------
+            # Parse buffer
+            #-----------------------------------------------------------------------
+            tuple = struct.unpack (format, data)
+            self.Axis               = tuple[nAxis1]
+            self.Buttons            = tuple[nButtons]
+            self.Cadence            = tuple[nCadence]
+            self.CurrentResistance  = tuple[nCurrentResistance]
+            #self.Header            = tuple[nHeader]   filled in USB_Read already
+            self.HeartRate          = tuple[nHeartRate]
+            self.PedalEcho          = tuple[nEvents]
+            self.TargetResistanceFT = tuple[nTargetResistance]
+            self.WheelSpeed         = tuple[nSpeed]
+
+            self.Wheel2Speed()
+            self.CurrentResistance2Power()
+
+            if debug.on(debug.Function):
+                logfile.Write ("ReceiveFromTrainer() = hr=%s Buttons=%s Cadence=%s Speed=%s TargetRes=%s CurrentRes=%s CurrentPower=%s, pe=%s hdr=%s %s" % \
+                            (  self.HeartRate, self.Buttons, self.Cadence, self.SpeedKmh, self.TargetResistance, self.CurrentResistance, self.CurrentPower, self.PedalEcho, hex(self.Header), self.Message) \
+                            )
+    #---------------------------------------------------------------------------
+    # R e c e i v e F r o m T r a i n e r
+    #---------------------------------------------------------------------------
+    # input     usbDevice
+    #
+    # function  Read status from trainer
+    #
+    # output    self.MotorBrake and MotorBrake values
+    #
+    # returns   True/False for correct message received
+    #---------------------------------------------------------------------------
+    def _ReceiveFromTrainer_MotorBrake(self):
+        if debug.on(debug.Function):logfile.Write ("clsTacxNewUsbTrainer._ReceiveFromTrainer_MotorBrake()...")
+        #-----------------------------------------------------------------------
+        # Define default
+        # From 2020-01-11: MotorBrake is the default
+        #                  When a correct message is received with Serial=0
+        #                  then it is a MagneticBrake
+        # And when explicitly specified (-t) then that value overrules.
+        #-----------------------------------------------------------------------
+        self.MotorBrake = True
+        rtn             = False
+
+        #-----------------------------------------------------------------------
+        # Read from trainer
+        #-----------------------------------------------------------------------
+        data  = self.USB_Read_retry4x40(USB_VersionResponse)
+
+        if len(data) < 40:
+            pass
+        else:
+            #-------------------------------------------------------------------
+            # Define buffer format
+            #-------------------------------------------------------------------
+            fFiller0_23             = sc.pad * 24       #  0...23
+
+            _nHeader                = 0
+            fHeader                 = sc.unsigned_int   # 24...27
+
+            nMotorBrakeUnitFirmware = 1
+            fMotorBrakeUnitFirmware = sc.unsigned_int   # 28...31   0.x.y.z
+
+            nMotorBrakeUnitSerial   = 2                 # 32...35   tt-YY-##### (tt=41 (T1941), YY=year,
+            fMotorBrakeUnitSerial   = sc.unsigned_int   #                 ##### brake individual serial)
+
+            nVersion2               = 3                 # 36, 37
+            fVersion2               = sc.unsigned_short
+
+            fFiller38_63            = sc.pad * (63-37)  # 38...63
+
+            format = sc.no_alignment + fFiller0_23 + fHeader + fMotorBrakeUnitFirmware + \
+                        fMotorBrakeUnitSerial + \
+                        fVersion2 + fFiller38_63
+
+            #-----------------------------------------------------------------------
+            # Buffer must be 64 characters (struct.calcsize(format)),
+            # Note that tt_FortiusSB returns 48 bytes only; append with dummy
+            #-----------------------------------------------------------------------
+            for _v in range( 64 - len(data) ):
+                data.append(0)
+
+            #-----------------------------------------------------------------------
+            # Parse buffer
+            #-----------------------------------------------------------------------
+            tuple = struct.unpack (format, data)
+            #self.Header                = tuple[nHeader]   filled in USB_Read already
+            self.MotorBrakeUnitFirmware = tuple[nMotorBrakeUnitFirmware]
+            self.MotorBrakeUnitSerial   = tuple[nMotorBrakeUnitSerial]
+            self.Version2               = tuple[nVersion2]
+
+            #-----------------------------------------------------------------------
+            # Split serial; all decimal digits = tt-yy-#####
+            # Note that ##### may be any length; e.g. 1903!
+            #-----------------------------------------------------------------------
+            s = str(self.MotorBrakeUnitSerial)
+            self.MotorBrakeUnitType     = 0
+            self.MotorBrakeUnitYear     = 0
+            Serial                      = 0
+            try:
+                self.MotorBrakeUnitType = int(s[0:2])
+                self.MotorBrakeUnitYear = int(s[2:4])
+                Serial                  = int(s[4:])
+            except:
+                pass
+
+            #-----------------------------------------------------------------------
+            # If T1941 or T1946 motorbrake, then calibration is supported AND
+            #       a different PowerCurve is used.
+            #
+            # Note that Headunit T1932 does not return a value for T1901
+            #       Note that, only the T1932 controls a magnetic brake.
+            #
+            # #173 The possible motor brakes are T1941 (230V) and T1946 (110V)
+            #       Controlled by T1932 and T1942 headunits.
+            #-----------------------------------------------------------------------
+            if self.MotorBrakeUnitType in (41, 46, 49):
+                self.MotorBrake = True
+
+            if self.MotorBrakeUnitSerial == 0:
+                self.MotorBrake = False
+
+            #-----------------------------------------------------------------------
+            # Important enough; always display
+            #-----------------------------------------------------------------------
+            if self.MotorBrakeUnitSerial == 0:
+                logfile.Console ("Motor Brake Unit Firmware=%s Serial=%s MotorBrake=%s" % \
+                                (   hex(self.MotorBrakeUnitFirmware), Serial, self.MotorBrake) \
+                                )
+            else:
+                logfile.Console ("Motor Brake Unit Firmware=%s Serial=%5s year=%s type=T19%s Version2=%s MotorBrake=%s" % \
+                                (   hex(self.MotorBrakeUnitFirmware), Serial, \
+                                    self.MotorBrakeUnitYear + 2000, self.MotorBrakeUnitType, \
+                                    self.Version2, self.MotorBrake) \
+                                )
+
+            #-----------------------------------------------------------------------
+            # Correct message received
+            #-----------------------------------------------------------------------
+            rtn = True
+
+        #---------------------------------------------------------------------------
+        # If specified, take that value (regardless what happend before!!)
+        #---------------------------------------------------------------------------
+        if self.clv.Tacx_MotorBrake:    self.MotorBrake = True
+        if self.clv.Tacx_MagneticBrake: self.MotorBrake = False
+
+        #---------------------------------------------------------------------------
+        # Return that a correct message is received
+        # This does NOT reflect whether is a Motor- of Magnetic brake!
+        #---------------------------------------------------------------------------
+        if debug.on(debug.Function):logfile.Write ("... returns %s" % rtn)
+        return rtn
+
+#-------------------------------------------------------------------------------
+# c l s T a c x S e r i a l T r a i n e r
+#-------------------------------------------------------------------------------
+# Tacx Motorbrake T1941 with Serial Connection Either with Raspberry Pi GPIO or 
+# TTL to USB and no Headunit.
+#-------------------------------------------------------------------------------
+class clsTacxSerialTrainer(clsTacxUsbTrainer):
+    def __init__(self, clv, Message, Headunit, UsbDevice):
+        super().__init__(clv, Message)
+        if debug.on(debug.Function):logfile.Write ("clsTacxNewUsbTrainer.__init__()")
+        self.SpeedScale = 289.75                    # See comment above
+        self.PowerResistanceFactor = 128866         # TotalReverse
+        #---------------------------------------------------------------------------
+        # @totalreverse Do you know how 128866 was derived?
+        # TotalReverse - 11-1-2021 - https://github.com/WouterJD/FortiusANT/issues/171#issuecomment-758277058
+        # The 128866 was the result of my first "fittings" a long time ago without having a power meter.
+        # I do not know which program and version I used for the test, but I tried to fit the power readings and speed showed by the software with recorded values from the data frames.
+        # At least for the T1941 brakes, the "1/137N" formula fits better.
+        #---------------------------------------------------------------------------
+        self.Headunit   = Headunit
+        self.UsbDevice  = UsbDevice
+        self.OK         = True
+        self.Operational= True                      # Always true for USB-trainers
+
+        self.MotorBrakeUnitFirmware = 0             # Introduced 2020-11-23
+        self.MotorBrakeUnitSerial   = 0
+        self.MotorBrakeUnitYear     = 0
+        self.MotorBrakeUnitType     = 0             # 41 = T1941 (Fortius motorbrake)
+                                                    # 01 = T1901 (Magnetic brake)
+        self.Version2               = 0
+
+        #---------------------------------------------------------------------------
+        # Initial state = stop
+        # Do not refresh() before sending a command
+        #---------------------------------------------------------------------------
+        self.SendToTrainer(True, modeStop)
+        time.sleep(0.1)                            # Allow head unit time to process
+        self.Refresh(True, modeStop)
+        time.sleep(0.1)                            # Allow head unit time to process
+        
+        #---------------------------------------------------------------------------
+        # Check motor brake version
+        #---------------------------------------------------------------------------
+        retry = 4
+        while True:
+            self.SendToTrainer(True, modeMotorBrake)
+            time.sleep(0.1)                        # Allow head unit time to process
+            msgReceived = self._ReceiveFromTrainer_MotorBrake()
+            time.sleep(0.1)                        # Allow head unit time to process
+
+            if not msgReceived and retry:
+                if debug.on(debug.Any):
+                    logfile.Write ('Retry because no motor brake version message received')
+                retry -= 1
+            else:
+                break
+        if not msgReceived:
+            logfile.Write ('No motorbrake version message received from head unit')
+ 
+        #---------------------------------------------------------------------------
+        # Refresh with stop-command
+        #---------------------------------------------------------------------------
+        self.SendToTrainer(True, modeStop)
+        time.sleep(0.1)                        # Allow head unit time to process
+        self.Refresh(True, modeStop)
+
+        #---------------------------------------------------------------------------
+        if debug.on(debug.Function):logfile.Write ("clsTacxSerialTrainer.__init__() done")
+
+    #---------------------------------------------------------------------------
+    # Basic physics: Power = Resistance * Speed  <==> Resistance = Power / Speed
+    #---------------------------------------------------------------------------
+    def CurrentResistance2Power(self):
+        #-------------------------------------------------------------------
+        # e.g. Tacx Fortius: Motor Brake T1941 connected to no head unit
+        #-------------------------------------------------------------------
+        self.CurrentPower = int(self.CurrentResistance / self.PowerResistanceFactor * self.WheelSpeed)
+
+        #-------------------------------------------------------------------
+        # e.g. Tacx Fortius: Motor Brake T1941 connected to no head unit
+        #-------------------------------------------------------------------
+        if self.WheelSpeed > 0:
+            rtn = self.TargetPower * self.PowerResistanceFactor / self.WheelSpeed
+            rtn = self.__AvoidCycleOfDeath(rtn)
 
         rtn = int(rtn)
 
