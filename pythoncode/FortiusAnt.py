@@ -41,7 +41,6 @@ import struct
 import threading
 import time
 import usb.core
-
 import antDongle            as ant
 import antHRM               as hrm
 import antFE                as fe

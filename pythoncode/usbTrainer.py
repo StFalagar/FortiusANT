@@ -159,6 +159,7 @@ import logfile
 import structConstants   as sc
 import FortiusAntCommand as cmd
 import fxload
+import serial
 
 #-------------------------------------------------------------------------------
 # Constants
@@ -377,6 +378,7 @@ class clsTacxTrainer():
         if clv.Tacx_Vortex:     return clsTacxAntVortexTrainer(clv, AntDevice)
         if clv.Tacx_Genius:     return clsTacxAntGeniusTrainer(clv, AntDevice)
         if clv.Tacx_Bushido:    return clsTacxAntBushidoTrainer(clv, AntDevice)
+        if clv.Tacx_Serial:     return clsTacxSerialTrainer(clv, AntDevice)
 
         #-----------------------------------------------------------------------
         # So we are going to initialize USB
@@ -3436,17 +3438,26 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     #---------------------------------------------------------------------------
     # S e r i a l _ R e a d
     #---------------------------------------------------------------------------
-    # input     UsbDevice
+    # input     Serial Connection
+    #   
+    #           port = serial.Serial(device, baudrate=19200, timeout=0.1, 
+    #               parity = serial.PARITY_NONE, bytesize = serial.EIGHTBITS, 
+    #               stopbits = serial.STOPBITS_ONE, xonxoff = False, 
+    #               rtscts = False, dsrdtr = False )
     #
     # function  Read data from Tacx Serial trainer
     #
     # returns   data
-    #---------------------------------------------------------------------------
+    #---------------------------------------------------------------------------   
     def Serial_Read(self):
         self.tacxEvent = True                   # Assume we receive correct buffer
         data = array.array('B', [])             # Empty array of bytes
+
+        port = serial.Serial("/dev/serial0", baudrate=19200, timeout=0.1)
+        port.read_all()   # just in case - to delete remaining data in input buffers
+
         try:
-            data = self.UsbDevice.read(0x82, 64, 30)
+            data = port.read(64)
         except TimeoutError:
             self.tacxEvent = False              # No data received
             pass
@@ -3455,7 +3466,7 @@ class clsTacxSerialTrainer(clsTacxTrainer):
             if "timeout error" in str(e) or "timed out" in str(e): # trainer did not return any data
                 pass
             else:
-                logfile.Console("Read from USB trainer error: " + str(e))
+                logfile.Console("Read from Serial trainer error: " + str(e))
 
         #-----------------------------------------------------------------------
         # 24...27 is the message response header
@@ -3474,7 +3485,7 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     #---------------------------------------------------------------------------
     # S e r i a l _ R e a d _ r e t r y 4 x 4 0
     #---------------------------------------------------------------------------
-    # input     UsbDevice
+    # input     Serial Connection
     #           expectedHeader: the received message must contain this header
     #               Especially at start-of-program, sometimes rubbish is received
     #               which influences the content of the MotorBrake version message
@@ -3487,7 +3498,7 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         retry = 4
 
         while True:
-            data  = self.USB_Read()
+            data  = self.Serial_Read()
 
             #-------------------------------------------------------------------
             # Retry if no correct buffer received
@@ -3543,9 +3554,6 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     def SendToTrainerSerialData(self, TacxMode, Calibrate, PedalEcho, Target, Weight):
         raise NotImplementedError                   # To be defined in sub-class
 
-    def SendToTrainerSerialData_MotorBrake(self):
-        return False                                # Can be overwritten in sub-class
-
     def SendToTrainer(self, _QuarterSecond, TacxMode):
         assert (TacxMode in (modeStop, modeResistance, modeCalibrate, modeMotorBrake))
 
@@ -3599,11 +3607,8 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         if error:
             logfile.Console(error)
         else:
-            if TacxMode == modeMotorBrake:
-                data   = self.SendToTrainerSerialData_MotorBrake()
-            else:
-                Target = int(Target)
-                data   = self.SendToTrainerSerialData(TacxMode, Calibrate, PedalEcho, Target, Weight)
+            Target = int(Target)
+            data   = self.SendToTrainerSerialData(TacxMode, Calibrate, PedalEcho, Target, Weight)
 
             #-------------------------------------------------------------------
             # Send buffer to trainer
@@ -3615,7 +3620,8 @@ class clsTacxSerialTrainer(clsTacxTrainer):
                                                 (TacxMode, Target, PedalEcho, Weight, Calibrate))
 
                 try:
-                    self.UsbDevice.write(0x02, data, 30)                             # send data to device
+                    port = serial.Serial("/dev/serial0", baudrate=19200, timeout=0.1)
+                    port.read_all()                              # just in case - to delete remaining data in input buffers
+                    port.write(data)                             # send data to device                  
                 except Exception as e:
                     logfile.Console("Write to USB trainer error: " + str(e))
-

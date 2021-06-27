@@ -391,7 +391,7 @@ def LocateHW(FortiusAntGui):
     else:
         AntDongle = ant.clsAntDongle(clv.antDeviceID)
         manualMsg = ''
-        if AntDongle.OK or not (clv.Tacx_Vortex or clv.Tacx_Genius or clv.Tacx_Bushido):       # 2020-09-29
+        if AntDongle.OK or not (clv.Tacx_Vortex or clv.Tacx_Genius or clv.Tacx_Bushido or clv.Tacx_Serial):       # 2020-09-29
              if clv.homeTrainer: manualMsg = ' (home trainer)'
              if clv.manual:      manualMsg = ' (manual power)'
              if clv.manualGrade: manualMsg = ' (manual grade)'
@@ -426,7 +426,7 @@ def LocateHW(FortiusAntGui):
     #---------------------------------------------------------------------------
     if debug.on(debug.Application): logfile.Write ("Scan for hardware - end")
                                                                     # 2020-09-29
-    return ((AntDongle.OK or (not (clv.Tacx_Vortex or clv.Tacx_Genius or clv.Tacx_Bushido)
+    return ((AntDongle.OK or (not (clv.Tacx_Vortex or clv.Tacx_Genius or clv.Tacx_Bushido or clv.Tacx_Serial)
                               and (clv.homeTrainer or clv.manual or clv.manualGrade or clv.ble))) \
             and TacxTrainer.OK)
     

@@ -121,6 +121,7 @@ class CommandLineVariables(object):
     Tacx_Vortex     = False
     Tacx_Genius     = False
     Tacx_Bushido    = False
+    Tacx_Serial     = False     # Headless Fortius Brake connecting to GPIO or TTY to USB for Raspi
     Tacx_MotorBrake = False
     Tacx_MagneticBrake = False
     Tacx_Cadence    = True      # Trainer has cadence sensor; only for USB-trainers
@@ -242,7 +243,7 @@ class CommandLineVariables(object):
         parser.add_argument   ('-s', dest='simulate',                                   help=constants.help_s,  required=False, action='store_true')
 #scs    parser.add_argument   ('-S', dest='scs',                metavar='ANT+ DeviceID',help=constants.help_S,  required=False, default=False, type=int)
         parser.add_argument   ('-T', dest='Transmission',       metavar='see text',     help=constants.help_T,  required=False, default=False)
-        self.ant_tacx_models = ['Bushido', 'Genius', 'Vortex', 'Magneticbrake', 'Motorbrake']
+        self.ant_tacx_models = ['Bushido', 'Genius', 'Vortex', 'Magneticbrake', 'Motorbrake' ,'Serial']
         parser.add_argument   ('-t', dest='TacxType',                                   help=constants.help_t, required=False, default=False, \
                     choices=self.ant_tacx_models + ['i-Vortex'])
                     # i-Vortex is still allowed for compatibility
@@ -567,6 +568,8 @@ class CommandLineVariables(object):
                 self.Tacx_Magneticbrake = True
             elif 'Motorbrake' in self.TacxType:
                 self.Tacx_MotorBrake = True
+            elif 'Serial' in self.TacxType:
+                self.Tacx_Serial = True    
             else:
                 logfile.Console('Command line error; -t incorrect value=%s' % self.args.TacxType)
                 self.args.TacxType = False
