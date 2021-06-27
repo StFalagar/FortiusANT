@@ -3538,6 +3538,73 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         return data
 
     #---------------------------------------------------------------------------
+    # S e n d T o T r a i n e r S e r i a l D a t a
+    #---------------------------------------------------------------------------
+    # input     Mode, Target, Pedecho, Weight, Calibrate
+    #
+    # function  Called by SendToTrainer()
+    #           Compose buffer to be sent to trainer
+    #
+    # returns   data
+    #---------------------------------------------------------------------------
+    def SendToTrainerSerialData(self, TacxMode, Calibrate, PedalEcho, Target, Weight):
+        Target = int(min(0x7fff, Target))
+        Weight = int(min(0xff,   Weight))
+        #-----------------------------------------------------------------------
+        # Data buffer depends on trainer_type
+        # Refer to TotalReverse; "Newer protocol"
+        #-----------------------------------------------------------------------
+        # 2021-01-14 Description appears to be extended as follows:
+        # 0	0x01	command number (1 = control command)
+        # 1	0x08	payload message size (0 = no payload)
+        # 2	0x01	payload type (0x01 = control data?)
+        # 3	0x00	never seen anything else than 0x00 - maybe high byte of little endian 16 bit?
+        #
+        # Therefore USB_ControlCommand  = 0x00010801 ==> CommandNumber = 1
+        #       and USB_VersionRequest  = 0x00000002 ==> CommandNumber = 2
+        # I do not change the code accordingly (just for sake of beauty?)
+        #       in favor of stability
+        #-----------------------------------------------------------------------
+        fControlCommand     = sc.unsigned_int       # 0...3
+        fTarget             = sc.short              # 4, 5      Resistance for Power=50...1000Watt
+        fPedalecho          = sc.unsigned_char      # 6
+        fFiller7            = sc.pad                # 7
+        fMode               = sc.unsigned_char      # 8         Idle=0, Ergo/Slope=2, Calibrate/speed=3
+        fWeight             = sc.unsigned_char      # 9         0x0a for 'almost no fly wheel' or
+                                                            # weight of rider+bike in kg for 
+                                                            # 'realistic' simulation of riders mass
+                                                            # TotalReverse, updated 2020-01-04
+        fCalibrate          = sc.unsigned_short     # 10, 11    Depends on mode
+
+        #-----------------------------------------------------------------------
+        # Avoid motor-function for low TargetPower
+        # The motor-function seemed odd when this piece of code was created.
+        # BUT: for people with a very low FTP (50 Watt), the resistance of the
+        #      bike without brake is already more than the required power and
+        #      hence motor-operation is usefull
+        #
+        # Is disabled with "if False"
+        #
+        # 2021-02-19 Test done: -m with delta power = 10Watt
+        #       Calibration = approximately 37 Watt
+        #       Requested power 90..80..70..60..50..40 Watt: normal behaviour
+        #                       30..20..10..0 Watt: motor starts to help
+        #                       There still is a slight feeling to cycle.
+        #       Conclusion: also in PowerMode, Target may drop below Calibrate.
+        #-----------------------------------------------------------------------
+        if False and self.TargetMode == mode_Power and Target < Calibrate:
+            Target = Calibrate        
+
+        #-----------------------------------------------------------------------
+        # Build data buffer to be sent to trainer (legacy or new)
+        #-----------------------------------------------------------------------
+        self.ControlCommand = USB_ControlCommand
+        format = sc.no_alignment + fControlCommand + fTarget + fPedalecho + fFiller7 + fMode +    fWeight + fCalibrate
+        data   = struct.pack (format, self.ControlCommand,Target, PedalEcho,        TacxMode,  int(Weight),  Calibrate)
+        return data
+
+
+    #---------------------------------------------------------------------------
     # S e n d T o T r a i n e r
     #---------------------------------------------------------------------------
     # input     UsbDevice, TacxMode
@@ -3551,9 +3618,6 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     #
     # returns   None
     #---------------------------------------------------------------------------
-    def SendToTrainerSerialData(self, TacxMode, Calibrate, PedalEcho, Target, Weight):
-        raise NotImplementedError                   # To be defined in sub-class
-
     def SendToTrainer(self, _QuarterSecond, TacxMode):
         assert (TacxMode in (modeStop, modeResistance, modeCalibrate, modeMotorBrake))
 
@@ -3563,7 +3627,7 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         Weight    = 0
 
         if debug.on(debug.Function):
-            logfile.Write ("clsTacxUsbTrainer.SendToTrainer(T=%s, M=%s, P=%s, G=%s, R=%s, W=%s, PE=%s, S=%s, C=%s)" % \
+            logfile.Write ("clsTacxSerialTrainer.SendToTrainer(T=%s, M=%s, P=%s, G=%s, R=%s, W=%s, PE=%s, S=%s, C=%s)" % \
             (TacxMode, self.TargetMode, self.TargetPower, self.TargetGrade, \
             self.TargetResistance, self.UserAndBikeWeight, self.PedalEcho, \
             self.SpeedKmh, self.Cadence))
