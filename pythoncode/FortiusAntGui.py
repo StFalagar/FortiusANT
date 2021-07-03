@@ -717,7 +717,7 @@ class frmFortiusAntGui(wx.Frame):
 
     def callLocateHW(self):
         print("callLocateHW not defined by application class")
-
+        
         if self.clv.PedalStrokeAnalysis:
             # Fill list and show it 
             for i in range(0,360,int(9)):                           # 9 degrees
@@ -1091,7 +1091,7 @@ class frmFortiusAntGui(wx.Frame):
     def SetMessages(self, Tacx=None, Dongle=None, HRM=None):       # Tread safe
         wx.CallAfter(self.SetMessagesGUI, Tacx, Dongle, HRM)
 
-    def SetMessagesGUI(self, Tacx=None, Dongle=None, HRM=None):
+    def SetMessagesGUI(self, Tacx=None, Dongle=None, HRM=None):       
         if Tacx   != None:
             if Tacx[:4] == '* * ':                         # We're calibrating!
                 self.Calibrating = True
@@ -1350,10 +1350,9 @@ class frmFortiusAntGui(wx.Frame):
     # Output:       None
     # --------------------------------------------------------------------------
     def OnClick_btnLocateHW(self, event=False):
-        if __name__ == "__main__": print ("OnClick_btnLocateHW()")
-
+        if __name__ == "__main__": print ("OnClick_btnLocateHW()")       
         self.OnTimerEnabled = False
-        rtn = self.callLocateHW()
+        rtn = self.callLocateHW()       
         self.OnTimerEnabled = True
         if rtn:
             self.btnRunoff.Enable()

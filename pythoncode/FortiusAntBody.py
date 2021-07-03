@@ -399,17 +399,20 @@ def LocateHW(FortiusAntGui):
 
     #---------------------------------------------------------------------------
     # Get Trainer and find trainer model for Windows and Linux
-    #---------------------------------------------------------------------------
+    #---------------------------------------------------------------------------   
     if debug.on(debug.Application): logfile.Write ("Get Tacx Trainer")
+    
     if TacxTrainer and TacxTrainer.OK:
         pass
     else:
         TacxTrainer = usbTrainer.clsTacxTrainer.GetTrainer(clv, AntDongle)
+        
         FortiusAntGui.SetMessages(Tacx=TacxTrainer.Message)
         if TacxTrainer.OK:
             rpi.DisplayState(constants.faTrainer, TacxTrainer)
         else:
             rpi.DisplayState(constants.faStarted, TacxTrainer)
+            
 
     #---------------------------------------------------------------------------
     # Show where the heartrate comes from 
@@ -426,7 +429,7 @@ def LocateHW(FortiusAntGui):
     #---------------------------------------------------------------------------
     if debug.on(debug.Application): logfile.Write ("Scan for hardware - end")
                                                                     # 2020-09-29
-    return ((AntDongle.OK or (not (clv.Tacx_Vortex or clv.Tacx_Genius or clv.Tacx_Bushido or clv.Tacx_Serial)
+    return ((AntDongle.OK or (not (clv.Tacx_Vortex or clv.Tacx_Genius or clv.Tacx_Bushido)
                               and (clv.homeTrainer or clv.manual or clv.manualGrade or clv.ble))) \
             and TacxTrainer.OK)
     

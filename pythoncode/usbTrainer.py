@@ -170,6 +170,7 @@ hu1904          = 0x1904    # New "white green" iMagic headunit (firmware inside
 hu1932          = 0x1932    # New "white blue" Fortius headunit (firmware inside)
 hu1942          = 0x1942    # Old "solid blue" Fortius (firmware inside)
 hue6be_nfw      = 0xe6be    # Old "solid blue" Fortius (without firmware)
+serial_conn     = 0x1941    # T1941 Motorbrake without headunit through Serial Connection
 
 idVendor_Tacx   = 0x3561
 
@@ -274,13 +275,6 @@ fortius_fw = os.path.join(dirname, 'tacxfortius_1942_firmware.hex')
 #     def SendToTrainerUSBData(TacxMode, ...)                 # Compose new buffer to be sent
 #     def _ReceiveFromTrainer ()                              # Read and parse new data from trainer
 #
-# class clsTacxSerialTrainer(clsTacxTrainer)
-#     def Wheel2Speed()                                       # Convert Wheelspeed -> Kmh
-#     def Speed2Wheel(SpeedKmh)                               # Convert Kmh --> Wheelspeed
-#     def Refresh(QuarterSecond, TacxMode)                    # Add USB-special(s) to parent.Refresh()
-#     def Serial_Read()                                       # Read buffer from Serial connected Tacx
-#     def SendToTrainer(tacxMode)                             # Send buffer to Serial connected Tacx
-#
 #-------------------------------------------------------------------------------
 # c l s T a c x T r a i n e r           The parent for all trainers
 #-------------------------------------------------------------------------------
@@ -378,7 +372,6 @@ class clsTacxTrainer():
         if clv.Tacx_Vortex:     return clsTacxAntVortexTrainer(clv, AntDevice)
         if clv.Tacx_Genius:     return clsTacxAntGeniusTrainer(clv, AntDevice)
         if clv.Tacx_Bushido:    return clsTacxAntBushidoTrainer(clv, AntDevice)
-        if clv.Tacx_Serial:     return clsTacxSerialTrainer(clv, AntDevice)
 
         #-----------------------------------------------------------------------
         # So we are going to initialize USB
@@ -389,6 +382,16 @@ class clsTacxTrainer():
         dev             = False
         LegacyProtocol  = False
 
+        
+        #-----------------------------------------------------------------------
+        # Direct Serial Connection to T1941 Motorbrake 
+        #-----------------------------------------------------------------------
+        
+        if clv.Tacx_Serial:     
+            msg = "Direct Serial Connection to Motorbrake"
+            hu == serial_conn                       
+            return clsTacxSerialTrainer(clv,msg)
+        
         #-----------------------------------------------------------------------
         # Find supported trainer (actually we talk to a headunit)
         #-----------------------------------------------------------------------
@@ -3378,6 +3381,7 @@ class clsTacxNewUsbTrainer(clsTacxUsbTrainer):
 # c l s T a c x S e r i a l T r a i n e r
 #-------------------------------------------------------------------------------
 class clsTacxSerialTrainer(clsTacxTrainer):
+
     #---------------------------------------------------------------------------
     # Convert WheelSpeed --> Speed in km/hr
     # SpeedScale must be defined in sub-class
@@ -3412,7 +3416,8 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     def __init__(self, clv, Message):
         super().__init__(clv, Message)
         if debug.on(debug.Function):logfile.Write ("clsTacxNewSerialTrainer.__init__()")
-
+        self.OK         = True
+        self.Operational= True
         self.SpeedScale = 289.75                    # See comment above
         self.PowerResistanceFactor = 128866         # TotalReverse
         #---------------------------------------------------------------------------
@@ -3421,13 +3426,12 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         # The 128866 was the result of my first "fittings" a long time ago without having a power meter.
         # I do not know which program and version I used for the test, but I tried to fit the power readings and speed showed by the software with recorded values from the data frames.
         # At least for the T1941 brakes, the "1/137N" formula fits better.
-        #---------------------------------------------------------------------------
-        self.OK         = True
-        self.Operational= True                      # Always true for USB-trainers
-
+        #---------------------------------------------------------------------------       
+        
         self.MotorBrakeUnitFirmware = 0             # Introduced 2020-11-23
         self.MotorBrakeUnitSerial   = 0
         self.MotorBrakeUnitYear     = 0
+        self.MotorBrakeUnitType     = 0
         self.Version2               = 0
        
         #---------------------------------------------------------------------------
@@ -3438,7 +3442,28 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         time.sleep(0.1)                            # Allow head unit time to process
         self.Refresh(True, modeStop)
         time.sleep(0.1)                            # Allow head unit time to process
+        
+        self.Motorbrake = True
+        
+        #---------------------------------------------------------------------------
+        # Check motor brake version
+        #---------------------------------------------------------------------------
+        retry = 4
+        while True:
+            #self.SendToTrainer(True, modeMotorBrake)
+            #time.sleep(0.1)                        # Allow head unit time to process
+            msgReceived = self._ReceiveFromTrainer_MotorBrake()
+            time.sleep(0.1)                        # Allow head unit time to process
 
+            if not msgReceived and retry:
+                if debug.on(debug.Any):
+                    logfile.Write ('Retry because no motor brake version message received')
+                retry -= 1
+            else:
+                break
+        if not msgReceived:
+            logfile.Write ('No motorbrake version message received from head unit')
+        
         #---------------------------------------------------------------------------
         # Show how we behave
         #---------------------------------------------------------------------------
@@ -3575,10 +3600,20 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         data = array.array('B', [])             # Empty array of bytes
 
         port = serial.Serial("/dev/serial0", baudrate=19200, timeout=0.1)
-        port.read_all()   # just in case - to delete remaining data in input buffers
-
+        #port.timeout = 0.070
+                
         try:
-            data = port.read(64)
+            port.read_all()   # just in case - to delete remaining data in input buffers
+            #senddata = b'\x01\x08\x01\x00\x00\x00\x00\x00\x02\n\x10\x04'
+            #port.write(self.marshal(senddata))
+            
+            self.SendToTrainer(True,modeCalibrate)#Resistance)
+            time.sleep(0.1)
+            dataraw = port.read(64)
+            
+            if len(dataraw) <= 52:
+                data = self.unmarshal(dataraw)
+                            
         except TimeoutError:
             self.tacxEvent = False              # No data received
             pass
@@ -3592,8 +3627,8 @@ class clsTacxSerialTrainer(clsTacxTrainer):
         #-----------------------------------------------------------------------
         # 24...27 is the message response header
         #-----------------------------------------------------------------------
-        if len(data) > 27:
-            self.Header = int(data[27]<<24 | data[26]<<16 | data[25]<<8 | data[24] )
+        if len(data) >= 23:
+            self.Header = int(data[24-24] | data[25-24] | data[26-24] | data[27-24] )
         else:
             self.Header = -1
 
@@ -3618,13 +3653,14 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     def Serial_Read_retry4x40(self, expectedHeader = USB_ControlResponse):
         retry = 4
 
+
         while True:
             data  = self.Serial_Read()
-
+            
             #-------------------------------------------------------------------
             # Retry if no correct buffer received
             #-------------------------------------------------------------------
-            if retry and (len(data) < 40 or self.Header != expectedHeader):
+            if retry and (len(data) < 23 or self.Header != expectedHeader):
                 if debug.on(debug.Any):
                     logfile.Write ( \
                     'Retry because short buffer (len=%s) or incorrect header received (expected: %s received: %s)' % \
@@ -3633,11 +3669,11 @@ class clsTacxSerialTrainer(clsTacxTrainer):
                 retry -= 1
             else:
                 break
-
+        
         #-----------------------------------------------------------------------
         # Inform when there's something unexpected
         #-----------------------------------------------------------------------
-        if len(data) < 40:
+        if len(data) < 23:
             self.tacxEvent = False
             # 2020-09-29 the buffer is ignored when too short (was processed before)
             logfile.Console('Tacx head unit returns insufficient data, len=%s' % len(data))
@@ -3651,10 +3687,11 @@ class clsTacxSerialTrainer(clsTacxTrainer):
                 #            process) then the message disappears automatically.
                 #            A longer timeout does not help (tried: 100ms).
 
-        elif self.Header != expectedHeader:
-            self.tacxEvent = False
-            logfile.Console('Tacx head unit returns incorrect header %s (expected: %s)' % \
-                                        (hex(expectedHeader), hex(self.Header)))
+        #elif self.Header != expectedHeader:
+        #    self.tacxEvent = False
+        #    logfile.Console('Tacx head unit returns incorrect header %s (expected: %s)' % \
+        #                                (hex(expectedHeader), hex(self.Header)))
+            
 
         return data
 
@@ -3806,8 +3843,8 @@ class clsTacxSerialTrainer(clsTacxTrainer):
 
                 try:
                     port = serial.Serial("/dev/serial0", baudrate=19200, timeout=0.1)
-                    port.read_all()                              # just in case - to delete remaining data in input buffers
-                    port.write(data)                             # send data to device                  
+                    port.read_all()                              # just in case - to delete remaining data in input buffers                   
+                    port.write(self.marshal(data))               # send data to device                  
                 except Exception as e:
                     logfile.Console("Write to USB trainer error: " + str(e))
 
@@ -3822,6 +3859,72 @@ class clsTacxSerialTrainer(clsTacxTrainer):
     #
     #---------------------------------------------------------------------------
     def _ReceiveFromTrainer(self):
+        if debug.on(debug.Function):logfile.Write ("clsTacxNewSerialTrainer._ReceiveFromTrainer()")
+        
+        #-----------------------------------------------------------------------
+        # Read from trainer
+        # 64 bytes are expected
+        # 48 bytes are returned by some trainers
+        # 24 bytes are sometimes returned (T1932, Gui Leite 2020-06-11) and
+        #           seem to be incomplete buffers and are ignored.
+        # Also my own tacx returns empty buffers, very seldomly though
+        #-----
+        # TotalReverse, 2020-09-27:
+        # One more Information: the brake only sends an answer after receiving a
+        # command from the head unit. And the 1942 head unit only sends a command
+        # to the brake after receiving a frame from the host.
+        # You first have to increase the send rate to receive more frames
+        # (answers) from the brake.
+        #
+        # 2020-09-29 Practice shows that retry works; if not a message is given.
+        # Then the buffer is ignored to avoid returning wrong data. The outer
+        # loop will send a command and then receive again.
+        # Perhaps just ignoring the short buffer would be enough as well, but
+        # this has been tested and found working so I leave it.
+        #
+        # 2020-11-18 sleep() only done when too short buffer received
+        #   As said this SHOULD occur seldomly; if frequently it's bad behaviour
+        #   at this location. It is logged so that we don't mis it.
+        #-----------------------------------------------------------------------
+        # 2021-01-14 Description appears to be extended as follows:
+        # Header			Size: 4 bytes
+        # 24	0	0x03	command number (answer command)
+        # 25	1	0x13	payload data size 19
+        # 26	2	0x02	payload type number (0x02 = control answer)
+        # 27	3	0x00	never seen anything else than 0x00 - maybe high byte of little endian 16 bit?
+        #
+        # Therefore USB_ControlResponse = 0x00021303 ==> CommandResponse = 3
+        #       and USB_VersionResponse = 0x00000c03 ==> CommandResponse = 3
+        # As in SendToTrainerUSBData() I do not change the code accordingly.
+        #-----------------------------------------------------------------------
+        data  = self.Serial_Read_retry4x40()
+
+        if len(data) >= 23 and data[24-24] == 0x03 and data[25-24] == 19 and data[26-24] == 2 and data[27-24] == 0:
+            self.WheelSpeed         = data[32-24] | (data[33-24]<<8)
+            self.Cadence            = data[44-24]
+            #cadSensor               = answerDecoded[42-24]
+            #distance                = answerDecoded[28-24] | (answerDecoded[29-24]<<8) | (answerDecoded[30-24]<<16) | (answerDecoded[31-24]<<24)
+            #unknown34_35            = answerDecoded[34-24] | (answerDecoded[35-24]<<8)
+            self.CurrentResistance  = data[38-24] | (data[39-24]<<8)
+            #currentResistanceAvg    = data[36-24] | (data[37-24]<<8)
+            self.TargetResistanceFT = data[40-24] | (data[41-24]<<8)
+                       
+            #self.Header             = tuple[nHeader]   filled in USB_Read already
+            #self.HeartRate          = tuple[nHeartRate]
+            #self.PedalEcho          = tuple[nEvents]
+                     
+            self.Wheel2Speed()
+            self.CurrentResistance2Power()
+            
+            #print("ReceiveFromTrainer() = hr=%s Buttons=%s Cadence=%s Speed=%s TargetRes=%s CurrentRes=%s CurrentPower=%s, pe=%s hdr=%s %s" % \
+            #                (  self.HeartRate, self.Buttons, self.Cadence, self.SpeedKmh, self.TargetResistance, self.CurrentResistance, self.CurrentPower, self.PedalEcho, hex(self.Header), self.Message) \
+            #                )
+            if debug.on(debug.Function):
+                logfile.Write ("ReceiveFromTrainer() = hr=%s Buttons=%s Cadence=%s Speed=%s TargetRes=%s CurrentRes=%s CurrentPower=%s, pe=%s hdr=%s %s" % \
+                            (  self.HeartRate, self.Buttons, self.Cadence, self.SpeedKmh, self.TargetResistance, self.CurrentResistance, self.CurrentPower, self.PedalEcho, hex(self.Header), self.Message) \
+                            )
+
+    def _ReceiveFromTrainerOld(self):
         if debug.on(debug.Function):logfile.Write ("clsTacxNewSerialTrainer._ReceiveFromTrainer()")
         #-----------------------------------------------------------------------
         # Read from trainer
@@ -3946,7 +4049,8 @@ class clsTacxSerialTrainer(clsTacxTrainer):
                     fFiller34_35 + fFiller36_37 + fCurrentResistance + fTargetResistance + \
                     fEvents + fFiller43 + fCadence + fFiller45 + fModeEcho + \
                     fChecksumLSB + fChecksumMSB + fFiller49_63
-
+            
+            
             #-----------------------------------------------------------------------
             # Buffer must be 64 characters (struct.calcsize(format)),
             # Note that tt_FortiusSB returns 48 bytes only; append with dummy
@@ -3975,4 +4079,191 @@ class clsTacxSerialTrainer(clsTacxTrainer):
                 logfile.Write ("ReceiveFromTrainer() = hr=%s Buttons=%s Cadence=%s Speed=%s TargetRes=%s CurrentRes=%s CurrentPower=%s, pe=%s hdr=%s %s" % \
                             (  self.HeartRate, self.Buttons, self.Cadence, self.SpeedKmh, self.TargetResistance, self.CurrentResistance, self.CurrentPower, self.PedalEcho, hex(self.Header), self.Message) \
                             )
+
+
+    #---------------------------------------------------------------------------
+    # R e c e i v e F r o m T r a i n e r
+    #---------------------------------------------------------------------------
+    # input     usbDevice
+    #
+    # function  Read status from trainer
+    #
+    # output    self.MotorBrake and MotorBrake values
+    #
+    # returns   True/False for correct message received
+    #---------------------------------------------------------------------------
+    def _ReceiveFromTrainer_MotorBrake(self):
+        if debug.on(debug.Function):logfile.Write ("clsTacxNewSerialTrainer._ReceiveFromTrainer_MotorBrake()...")
+        self.MotorBrake = True
+        rtn             = False
+
+        #-----------------------------------------------------------------------
+        # Read from trainer
+        #-----------------------------------------------------------------------
+        data = array.array('B', [])             # Empty array of bytes
+        port = serial.Serial("/dev/serial0", baudrate=19200, timeout=0.1)                     
+        port.read_all()   # just in case - to delete remaining data in input buffers
+        senddata = bytes([0x02,0x00,0x00,0x00])
+        port.write(self.marshal(senddata))
+        time.sleep(0.1)
+        dataraw = port.read(64)       
+        if len(dataraw) == 38:
+          data = self.unmarshal(dataraw)
+        
+        if (len(data) >= 16 and data[24-24] == 0x03 and data[25-24] == 12 and data[26-24] == 0 and data[27-24] == 0):
+            serialNr    = (data[32-24]) | (data[33-24] << 8) | (data[34-24] << 16) | (data[35-24] << 24)
+            year        = serialNr // 100000 % 100
+            serialSmall = serialNr  % 100000
+            deviceNo    = serialNr // 10000000
+
+            #-----------------------------------------------------------------------
+            # Parse buffer
+            #-----------------------------------------------------------------------
+            #self.Header                 = tuple[nHeader]   filled in USB_Read already
+            self.MotorBrakeUnitFirmware = data[31-24] | data[30-24] | data[29-24] | data[28-24]
+            self.MotorBrakeUnitSerial   = serialNr
+            self.Version2               = serialSmall
+            self.MotorBrakeUnitType     = deviceNo
+            self.MotorBrakeUnitYear     = year
+            Serial                      = serialNr
+            
+            self.MotorBrake = True
+            
+            #-----------------------------------------------------------------------
+            # Important enough; always display
+            #-----------------------------------------------------------------------
+            logfile.Console ("Motor Brake Unit Firmware=%s Serial=%5s year=%s type=T19%s Version2=%s MotorBrake=%s" % \
+                            (   hex(self.MotorBrakeUnitFirmware), Serial, \
+                                self.MotorBrakeUnitYear + 2000, self.MotorBrakeUnitType, \
+                                self.Version2, self.MotorBrake) \
+                            )
+
+            #-----------------------------------------------------------------------
+            # Correct message received
+            #-----------------------------------------------------------------------
+            rtn = True
+
+        #---------------------------------------------------------------------------
+        # If specified, take that value (regardless what happend before!!)
+        #---------------------------------------------------------------------------
+        if self.clv.Tacx_MotorBrake: self.MotorBrake = True
+        
+        #---------------------------------------------------------------------------
+        # Return that a correct message is received
+        # This does NOT reflect whether is a Motor- of Magnetic brake!
+        #---------------------------------------------------------------------------
+        if debug.on(debug.Function): logfile.Write ("... returns %s" % rtn)
+        return rtn
+    
+    
+    def marshal(self,buffer):
+        buf = bytearray()
+
+        for b in buffer:
+            buf.append(bin2hex((b>>4)&0xf))
+            buf.append(bin2hex((b>>0)&0xf))
+
+        chk = checksum1(buf)
+        buf.append(bin2hex((chk>>4)&0xf))
+        buf.append(bin2hex((chk>>0)&0xf))
+        chk >>= 8
+        buf.append(bin2hex((chk>>4)&0xf))
+        buf.append(bin2hex((chk>>0)&0xf))
+
+        buf.insert(0, startOfFrame)
+        buf.append(endOfFrame)
+
+        return buf
+
+    def unmarshal(self,buffer):       
+        buf = bytearray()
+        if len(buffer) < 6:
+            print('frame too short')
+            return buf
+
+        if buffer[0] != startOfFrame or buffer[-1] != endOfFrame:
+            print('no valid frame')
+            #print(buffer[0])
+            #print(startOfFrame)
+            #return buf
+
+        chk = checksum1(buffer[1:-5])
+
+        try:
+            chkBuf  = hex2bin(buffer[-5])<<4
+            chkBuf += hex2bin(buffer[-4])<<0
+            chkBuf += hex2bin(buffer[-3])<<12
+            chkBuf += hex2bin(buffer[-2])<<8
+
+            #print('checksum  calc:{:4x} and buf:{:4x}'.format(chk, chkBuf))
+            if chk != chkBuf:
+                print('checksum error {:4x} != {:4x}'.format(chk, chkBuf))
+                return buf
+
+            for i in range(1,len(buffer)-5,2):
+                buf.append( (hex2bin(buffer[i])<<4)+hex2bin(buffer[i+1]) )
+
+        except HexValueError:
+            # typically caused by a transfer error of received data - probably 
+            # in the 4 byte checksum. The other case (a corrupted frame with
+            # a valid checksum) is unlikely (but can happen, too)
+            return bytearray()
+
+        return buf
+
+# bithack: parity
+def parity16(b):
+    b ^= b >> 8
+    b ^= b >> 4
+    b &= 0xf
+    return (0x6996 >> b) & 1
+
+# nibble => ascii: 0x0..0x9 => '0'..'9' and 0xa..0xf => 'A'..'F'
+def bin2hex(b):
+    if b >= 0 and b < 10:
+        return b + 0x30      # '0'
+    elif b >= 10 and b < 16:
+        return b - 10 + 0x41 # 'A'
+    else:
+        raise NameError("only 4bit nibbles allowed")
+
+def hex2bin(b):
+    if b >= 0x30 and b <= 0x39:
+        # '0'..'9'
+        return b - 0x30
+    elif b >= 0x41 and b <= 0x46:
+        # 'A'..'F'
+        return b + 10 - 0x41
+    elif b >= 0x61 and b <= 0x66:
+        # 'a'..'f'
+        return b + 10 - 0x61
+    # "special" fallback to handle case with wrong initialized brake
+    elif b == 0x0:
+        return 0
+    
+    raise HexValueError("only Ascii Hex chars allowed")
+
+# checksum1() is checksum() with "pre-decoded" '0x01' start-of-frame byte (based on shiftreg 0x0000)
+def checksum1(buffer):
+    shiftreg = 0xc0c1
+    # shiftreg = 0x0000
+    poly = 0xc001
+    for a in buffer:
+        tmp = a ^ (shiftreg & 0xff)
+        shiftreg >>= 8
+
+        if parity16(tmp):
+            shiftreg ^= poly
+
+        tmp ^= tmp<<1
+        shiftreg ^= tmp << 6
+
+    return shiftreg
+
+class HexValueError(Exception):
+    pass
+
+startOfFrame = 0x01
+endOfFrame   = 0x17
+
     
